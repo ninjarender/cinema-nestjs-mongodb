@@ -16,7 +16,7 @@ export class CreateHallDto {
   )
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100) // дублює length колонки → 400, а не помилка PG
+  @MaxLength(100) // дублює maxlength схеми → 400, а не ValidationError Mongoose
   name: string;
 
   @ApiProperty({ example: 3, minimum: 1, maximum: 100 })

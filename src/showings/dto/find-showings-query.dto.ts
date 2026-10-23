@@ -4,23 +4,25 @@ import {
   IsIn,
   IsISO8601,
   IsInt,
+  IsMongoId,
   IsOptional,
-  IsUUID,
   Matches,
   Max,
   Min,
 } from 'class-validator';
+import { OBJECT_ID_EXAMPLE } from '../../common/decorators/api-object-id-param.decorator.js';
+import { OBJECT_ID_FORMAT } from '../../common/pipes/parse-object-id.pipe.js';
 
 export const SORT_ORDERS = ['asc', 'desc'] as const;
 export type SortOrder = (typeof SORT_ORDERS)[number];
 
 export class FindShowingsQueryDto {
   @ApiPropertyOptional({
-    example: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
-    description: 'Залишає сеанси лише цього фільму',
+    example: OBJECT_ID_EXAMPLE,
+    description: `Залишає сеанси лише цього фільму; ${OBJECT_ID_FORMAT}`,
   })
   @IsOptional()
-  @IsUUID()
+  @IsMongoId({ message: `filmId must be an ${OBJECT_ID_FORMAT}` })
   filmId?: string;
 
   @ApiPropertyOptional({
@@ -65,7 +67,7 @@ export class FindShowingsQueryDto {
   @ApiPropertyOptional({
     enum: SORT_ORDERS,
     default: 'asc',
-    description: 'Порядок за часом початку; при рівному часі — за id',
+    description: 'Порядок за часом початку; при рівному часі — за _id',
   })
   @IsOptional()
   @IsIn(SORT_ORDERS)

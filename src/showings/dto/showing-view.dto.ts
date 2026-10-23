@@ -1,8 +1,19 @@
 import { ApiProperty } from '@nestjs/swagger';
+import type { Types } from 'mongoose';
+import { OBJECT_ID_EXAMPLE } from '../../common/decorators/api-object-id-param.decorator.js';
 
-/** Сеанс у відповідях на читання: назви фільму й залу замість ідентифікаторів. */
+/** Сеанс після populate('film', 'title') і populate('hall', 'name'). */
+export interface PopulatedShowing {
+  _id: Types.ObjectId;
+  film: { title: string };
+  hall: { name: string };
+  startsAt: Date;
+  price: number;
+}
+
+/** Сеанс у відповідях на читання: назви фільму й залу, без seats і bookings. */
 export class ShowingView {
-  @ApiProperty({ example: '7d1f9a3c-8e2b-4f6a-b1d4-3c5e7a9f0b2d' })
+  @ApiProperty({ example: OBJECT_ID_EXAMPLE, description: 'ObjectId' })
   id: string;
 
   @ApiProperty({ example: 'Тіні забутих предків' })
@@ -16,4 +27,14 @@ export class ShowingView {
 
   @ApiProperty({ example: 12500, description: 'Ціна квитка в копійках' })
   price: number;
+
+  static fromDocument(showing: PopulatedShowing): ShowingView {
+    const view = new ShowingView();
+    view.id = showing._id.toString();
+    view.filmTitle = showing.film.title;
+    view.hallName = showing.hall.name;
+    view.startsAt = showing.startsAt;
+    view.price = showing.price;
+    return view;
+  }
 }

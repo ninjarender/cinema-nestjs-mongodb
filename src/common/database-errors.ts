@@ -1,12 +1,10 @@
-import { QueryFailedError } from 'typeorm';
+/** Код помилки MongoDB «порушено унікальний індекс» (duplicate key). */
+export const DUPLICATE_KEY = 11000;
 
-/** Код помилки PostgreSQL «порушено унікальний індекс». */
-export const UNIQUE_VIOLATION = '23505';
-
-export function isUniqueViolation(error: unknown): boolean {
-  if (!(error instanceof QueryFailedError)) {
-    return false;
-  }
-  const driverError = error.driverError as { code?: string };
-  return driverError.code === UNIQUE_VIOLATION;
+export function isDuplicateKeyError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === DUPLICATE_KEY
+  );
 }

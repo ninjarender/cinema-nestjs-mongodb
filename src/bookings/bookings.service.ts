@@ -5,123 +5,154 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
-import { isUniqueViolation } from '../common/database-errors.js';
-import { Seat } from '../halls/dto/hall-with-seats.dto.js';
-import { HallsService } from '../halls/halls.service.js';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { SeatPosition } from '../halls/dto/hall-with-seats.dto.js';
+import { hallHasSeat } from '../halls/hall-seats.js';
+import { Hall } from '../halls/schemas/hall.schema.js';
+import { Showing } from '../showings/schemas/showing.schema.js';
 import { ShowingsCoreService } from '../showings/showings-core.service.js';
 import { BookingView, SeatAvailability } from './dto/booking-view.dto.js';
 import { CreateBookingDto } from './dto/create-booking.dto.js';
-import { BookingSeat } from './entities/booking-seat.entity.js';
-import { Booking } from './entities/booking.entity.js';
 
-const seatKey = ({ row, seat }: Seat): string => `${row}:${seat}`;
+const seatKey = ({ row, seat }: SeatPosition): string => `${row}:${seat}`;
 
 @Injectable()
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
 
   constructor(
-    @InjectRepository(Booking)
-    private readonly bookingsRepository: Repository<Booking>,
-    @InjectRepository(BookingSeat)
-    private readonly bookingSeatsRepository: Repository<BookingSeat>,
-    @InjectDataSource()
-    private readonly dataSource: DataSource,
+    @InjectModel(Showing.name)
+    private readonly showingModel: Model<Showing>,
     private readonly showingsCore: ShowingsCoreService,
-    private readonly hallsService: HallsService,
   ) {}
 
+  /** Бронювання лежать у документах сеансів — збираємо їх з усіх сеансів. */
   async findAll(): Promise<BookingView[]> {
-    const bookings = await this.bookingsRepository.find({
-      relations: { seats: true },
-      order: { createdAt: 'ASC', id: 'ASC' },
-    });
-    return bookings.map((booking) => this.toView(booking));
+    const showings = await this.showingModel.find(
+      { 'bookings.0': { $exists: true } },
+      'bookings',
+    );
+    return showings
+      .flatMap((showing) =>
+        showing.bookings.map((booking) =>
+          BookingView.fromBooking(booking, showing._id),
+        ),
+      )
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          a.id.localeCompare(b.id),
+      );
   }
 
   async findByShowing(showingId: string): Promise<BookingView[]> {
-    await this.showingsCore.findOne(showingId);
-    const bookings = await this.bookingsRepository.find({
-      where: { showingId },
-      relations: { seats: true },
-      order: { createdAt: 'ASC', id: 'ASC' },
-    });
-    return bookings.map((booking) => this.toView(booking));
+    const showing = await this.showingsCore.findOne(showingId, 'bookings');
+    return showing.bookings.map((booking) =>
+      BookingView.fromBooking(booking, showing._id),
+    );
   }
 
   async create(showingId: string, dto: CreateBookingDto): Promise<BookingView> {
-    const showing = await this.showingsCore.findOne(showingId, { hall: true });
-    const hall = showing.hall!;
+    // Існування сеансу й межі залу — ДО оновлення: фільтр оновлення не розрізняє
+    // неіснуюче місце й зайняте, і місце поза залом дало б 409 замість 400.
+    // Повтори місць у масиві відхиляє CreateBookingDto (@ArrayUnique) ще раніше.
+    const showing = await this.showingsCore
+      .findOne(showingId, 'hall price')
+      .then((found) =>
+        found.populate<{ hall: Hall }>('hall', 'name rows seatsPerRow'),
+      );
+    const { hall } = showing;
 
-    const outsideHall = dto.seats.filter(
-      (seat) => !this.hallsService.hasSeat(hall, seat),
-    );
+    const outsideHall = dto.seats.filter((seat) => !hallHasSeat(hall, seat));
     if (outsideHall.length > 0) {
       throw new BadRequestException(
         `У залі "${hall.name}" (${hall.rows} рядів × ${hall.seatsPerRow} місць) немає місць: ${this.formatSeats(outsideHall)}`,
       );
     }
 
-    // Зайнятість не перевіряємо заздалегідь: між перевіркою і записом місце могли б
-    // забрати. Гарантію дає унікальний індекс (showing_id, row, seat) у booking_seats.
-    try {
-      const booking = await this.dataSource.transaction(async (manager) => {
-        const booking = manager.create(Booking, {
-          showingId,
-          totalPrice: showing.price * dto.seats.length,
-        });
-        await manager.save(booking); // id генерує БД — тому місця ПІСЛЯ save
+    const seats = dto.seats.map(({ row, seat }) => ({ row, seat }));
+    const booking = {
+      _id: new Types.ObjectId(), // ДО оновлення: потрібен і в $set, і в $push, і у відповіді
+      seats,
+      totalPrice: showing.price * seats.length,
+      createdAt: new Date(),
+    };
 
-        const seats = dto.seats.map(({ row, seat }) =>
-          manager.create(BookingSeat, {
-            bookingId: booking.id,
-            showingId,
-            row,
-            seat,
-          }),
-        );
-        booking.seats = await manager.save(seats);
+    // Одне оновлення одного документа — неподільне. Фільтр вимагає, щоб КОЖНЕ місце
+    // було вільним; якщо хоч одне зайняте, документ не змінюється взагалі.
+    const result = await this.showingModel.updateOne(
+      {
+        _id: showing._id,
+        $and: seats.map(({ row, seat }) => ({
+          seats: { $elemMatch: { row, seat, bookingId: null } },
+        })),
+      },
+      {
+        $set: { 'seats.$[target].bookingId': booking._id },
+        $push: { bookings: booking },
+      },
+      {
+        arrayFilters: [
+          {
+            $or: seats.map(({ row, seat }) => ({
+              'target.row': row,
+              'target.seat': seat,
+            })),
+          },
+        ],
+      },
+    );
 
-        return booking;
-      });
-      return this.toView(booking);
-    } catch (error) {
-      // try навколо transaction: ROLLBACK уже відбувся, у БД немає ні бронювання, ні місць
-      if (isUniqueViolation(error)) {
-        throw await this.seatsTakenConflict(showingId, dto.seats);
-      }
-      throw error; // решта помилок БД лишаються 500
+    // Сеанс існує, межі й унікальність перевірені — 0 означає лише конфлікт.
+    // modifiedCount не годиться: він 0 і тоді, коли документ знайдено, але нічого не змінилось.
+    if (result.matchedCount === 0) {
+      throw await this.seatsTakenConflict(showingId, seats);
     }
+    return BookingView.fromBooking(booking, showing._id);
   }
 
   async getSeatsForShowing(showingId: string): Promise<SeatAvailability[]> {
-    const showing = await this.showingsCore.findOne(showingId, { hall: true });
-    const booked = await this.bookedSeatKeys(showingId);
-
-    return this.hallsService.getSeats(showing.hall!).map(({ row, seat }) => ({
+    const showing = await this.showingsCore.findOne(showingId, 'seats');
+    return showing.seats.map(({ row, seat, bookingId }) => ({
       row,
       seat,
-      isBooked: booked.has(seatKey({ row, seat })),
+      isBooked: bookingId !== null,
     }));
   }
 
   async remove(id: string): Promise<void> {
-    // Місця видаляє сама БД: ON DELETE CASCADE на booking_seats.booking_id
-    const result = await this.bookingsRepository.delete({ id });
-    if (result.affected === 0) {
+    // Id бронювання не містить посилання на сеанс: шукаємо сеанс за вкладеним елементом.
+    // Звільнення місць і видалення запису — одним оновленням.
+    const bookingId = new Types.ObjectId(id);
+    const result = await this.showingModel.updateOne(
+      { 'bookings._id': bookingId },
+      {
+        $set: { 'seats.$[target].bookingId': null },
+        $pull: { bookings: { _id: bookingId } },
+      },
+      { arrayFilters: [{ 'target.bookingId': bookingId }] },
+    );
+    if (result.matchedCount === 0) {
       this.logger.warn(`Бронювання з id ${id} не знайдено`);
       throw new NotFoundException(`Бронювання з id ${id} не знайдено`);
     }
   }
 
-  /** 409 зі списком зайнятих місць — без тексту помилки БД. */
+  /**
+   * 409 зі списком зайнятих місць. Читання тут лише для тексту помилки:
+   * рішення про конфлікт уже ухвалило атомарне оновлення.
+   */
   private async seatsTakenConflict(
     showingId: string,
-    requested: Seat[],
+    requested: SeatPosition[],
   ): Promise<ConflictException> {
-    const booked = await this.bookedSeatKeys(showingId);
+    const showing = await this.showingModel.findById(showingId, 'seats');
+    const booked = new Set(
+      (showing?.seats ?? [])
+        .filter(({ bookingId }) => bookingId !== null)
+        .map(seatKey),
+    );
     const taken = requested.filter((seat) => booked.has(seatKey(seat)));
     const details = taken.length > 0 ? `: ${this.formatSeats(taken)}` : '';
 
@@ -131,28 +162,7 @@ export class BookingsService {
     );
   }
 
-  private async bookedSeatKeys(showingId: string): Promise<Set<string>> {
-    const seats = await this.bookingSeatsRepository.find({
-      select: { row: true, seat: true },
-      where: { showingId },
-    });
-    return new Set(seats.map(seatKey));
-  }
-
-  private toView(booking: Booking): BookingView {
-    const seats = (booking.seats ?? [])
-      .map(({ row, seat }) => ({ row, seat }))
-      .sort((a, b) => a.row - b.row || a.seat - b.seat);
-    return {
-      id: booking.id,
-      showingId: booking.showingId,
-      seats,
-      totalPrice: booking.totalPrice,
-      createdAt: booking.createdAt,
-    };
-  }
-
-  private formatSeats(seats: Seat[]): string {
+  private formatSeats(seats: SeatPosition[]): string {
     return seats.map(({ row, seat }) => `ряд ${row} місце ${seat}`).join(', ');
   }
 }

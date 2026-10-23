@@ -1,69 +1,31 @@
-/// <reference types="vite/client" />
 import { INestApplication } from '@nestjs/common';
+import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
-import 'dotenv/config';
-import { Client } from 'pg';
+import { Model } from 'mongoose';
+import { existsSync } from 'node:fs';
 import request from 'supertest';
 import { App } from 'supertest/types.js';
-import { DataSource } from 'typeorm';
 import { AppModule } from './../src/app.module.js';
+import { Film } from './../src/films/schemas/film.schema.js';
+import { Hall } from './../src/halls/schemas/hall.schema.js';
+import { Showing } from './../src/showings/schemas/showing.schema.js';
 
-// e2e працює з окремою базою, щоб не чіпати дані розробки.
+// e2e працює з окремою базою <db>_test, щоб не чіпати дані розробки.
 // ConfigModule не перезаписує змінні, які вже є в process.env.
-process.env.POSTGRES_DB = `${process.env.POSTGRES_DB}_test`;
-
-// Класи міграцій напряму з src/ (CLI бере їх із dist/)
-const migrations = Object.values(
-  import.meta.glob<Record<string, Function>>('../src/migrations/*.ts', {
-    eager: true,
-  }),
-).flatMap((module) => Object.values(module));
-
-const MISSING_ID = '00000000-0000-4000-8000-000000000000';
-const tomorrow = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-
-async function prepareTestDatabase() {
-  const client = new Client({
-    host: process.env.POSTGRES_HOST,
-    port: Number(process.env.POSTGRES_PORT),
-    user: process.env.POSTGRES_USER,
-    password: process.env.POSTGRES_PASSWORD,
-    database: 'postgres',
-  });
-  await client.connect();
-  const db = process.env.POSTGRES_DB!;
-  const { rowCount } = await client.query(
-    'SELECT 1 FROM pg_database WHERE datname = $1',
-    [db],
-  );
-  if (rowCount === 0) {
-    await client.query(`CREATE DATABASE "${db}"`);
-  }
-  await client.end();
-
-  // Схема — тими самими міграціями, що й у розробці
-  const migrator = new DataSource({
-    type: 'postgres',
-    uuidExtension: 'pgcrypto',
-    host: process.env.POSTGRES_HOST,
-    port: Number(process.env.POSTGRES_PORT),
-    username: process.env.POSTGRES_USER,
-    password: process.env.POSTGRES_PASSWORD,
-    database: db,
-    migrations,
-  });
-  await migrator.initialize();
-  await migrator.runMigrations();
-  await migrator.destroy();
+if (existsSync('.env')) {
+  process.loadEnvFile(); // у CI змінні можуть прийти з оточення без файла
 }
+const uri = new URL(process.env.MONGODB_URI!);
+uri.pathname = `${uri.pathname.length > 1 ? uri.pathname : '/cinema'}_test`;
+process.env.MONGODB_URI = uri.toString();
+
+const MISSING_ID = '000000000000000000000000'; // коректний ObjectId, якого немає в базі
+const tomorrow = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
 describe('Cinema API (e2e)', () => {
   let app: INestApplication<App>;
   let http: ReturnType<typeof request>;
-
-  beforeAll(async () => {
-    await prepareTestDatabase();
-  });
+  let showingModel: Model<Showing>;
 
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -74,10 +36,13 @@ describe('Cinema API (e2e)', () => {
     await app.init();
     http = request(app.getHttpServer());
 
-    // Кожен тест — з чистого аркуша
-    await app
-      .get(DataSource)
-      .query('TRUNCATE booking_seats, bookings, showings, films, halls');
+    // Кожен тест — з чистого аркуша; індекси лишаються (deleteMany, а не drop)
+    const models = [Film, Hall, Showing].map((schema) =>
+      app.get<Model<unknown>>(getModelToken(schema.name)),
+    );
+    await Promise.all(models.map((model) => model.init()));
+    await Promise.all(models.map((model) => model.deleteMany({})));
+    showingModel = app.get<Model<Showing>>(getModelToken(Showing.name));
   });
 
   afterEach(async () => {
@@ -240,6 +205,8 @@ describe('Cinema API (e2e)', () => {
       expect(items[0].id < items[1].id).toBe(true);
       expect(items[0]).toMatchObject({ filmTitle: 'A', hallName: 'Зал 1' });
       expect(items[0]).not.toHaveProperty('filmId');
+      expect(items[0]).not.toHaveProperty('seats');
+      expect(items[0]).not.toHaveProperty('bookings');
 
       await http.get('/showings').query({ date: '02.05.2030' }).expect(400);
     });
@@ -275,7 +242,7 @@ describe('Cinema API (e2e)', () => {
         { limit: 101 },
         { limit: 'ten' },
         { sort: 'up' },
-        { filmId: 'not-a-uuid' },
+        { filmId: 'not-an-object-id' },
       ]) {
         await http.get('/showings').query(query).expect(400);
       }
@@ -366,6 +333,131 @@ describe('Cinema API (e2e)', () => {
         .post(`/showings/${MISSING_ID}/bookings`)
         .send({ seats: [{ row: 1, seat: 1 }] })
         .expect(404);
+    });
+  });
+
+  describe('identifiers', () => {
+    it('rejects a malformed id with 400 before touching the database', async () => {
+      for (const path of [
+        '/films/abc',
+        '/halls/abc',
+        '/showings/abc',
+        '/showings/abc/seats',
+        '/showings/abc/bookings',
+      ]) {
+        const res = await http.get(path).expect(400);
+        expect(res.body.message).toContain('ObjectId');
+      }
+      await http.patch('/films/abc').send({ title: 'X' }).expect(400);
+      await http.delete('/films/abc').expect(400);
+      await http.delete('/halls/abc').expect(400);
+      await http.delete('/bookings/abc').expect(400);
+      await http
+        .post('/showings/abc/bookings')
+        .send({ seats: [{ row: 1, seat: 1 }] })
+        .expect(400);
+      await http
+        .post('/showings')
+        .send({
+          filmId: 'abc',
+          hallId: MISSING_ID,
+          startsAt: tomorrow(),
+          price: 100,
+        })
+        .expect(400);
+    });
+
+    it('returns a string id and no internal Mongoose fields', async () => {
+      const res = await http
+        .post('/films')
+        .send({ title: 'Земля', durationMinutes: 75, releaseYear: 1930 })
+        .expect(201);
+      expect(res.body).toEqual({
+        id: expect.stringMatching(/^[0-9a-f]{24}$/),
+        title: 'Земля',
+        durationMinutes: 75,
+        releaseYear: 1930,
+      });
+      await http.get(`/films/${MISSING_ID}`).expect(404);
+      // ObjectId у верхньому регістрі нормалізується
+      await http.get(`/films/${res.body.id.toUpperCase()}`).expect(200);
+    });
+  });
+
+  describe('document model', () => {
+    it('fills seats on showing creation and keeps them out of the response', async () => {
+      const filmId = await createFilm();
+      const hallId = await createHall('Зал 1', 3, 5);
+      const res = await http
+        .post('/showings')
+        .send({ filmId, hallId, startsAt: tomorrow(), price: 12500 })
+        .expect(201);
+
+      expect(res.body).toEqual({
+        id: expect.any(String),
+        filmId,
+        hallId,
+        startsAt: expect.any(String),
+        price: 12500,
+      });
+      const stored = await showingModel.findById(res.body.id).lean();
+      expect(stored!.seats).toHaveLength(15);
+      expect(stored!.seats.every((s) => s.bookingId === null)).toBe(true);
+      expect(stored!.bookings).toEqual([]);
+
+      const one = await http.get(`/showings/${res.body.id}`).expect(200);
+      expect(one.body).toEqual({
+        id: res.body.id,
+        filmTitle: 'Тіні забутих предків',
+        hallName: 'Зал 1',
+        startsAt: expect.any(String),
+        price: 12500,
+      });
+    });
+
+    it('stores a booking inside the showing document and removes it on cancel', async () => {
+      const showingId = await createShowing(
+        await createFilm(),
+        await createHall('Зал 1', 3, 5),
+      );
+      const booking = await http
+        .post(`/showings/${showingId}/bookings`)
+        .send({ seats: [{ row: 3, seat: 5 }] })
+        .expect(201);
+
+      let stored = await showingModel.findById(showingId).lean();
+      expect(stored!.bookings).toHaveLength(1);
+      expect(stored!.bookings[0]._id.toString()).toBe(booking.body.id);
+      const taken = stored!.seats.filter((s) => s.bookingId !== null);
+      expect(taken).toEqual([
+        { row: 3, seat: 5, bookingId: stored!.bookings[0]._id },
+      ]);
+
+      await http.delete(`/bookings/${booking.body.id}`).expect(204);
+      stored = await showingModel.findById(showingId).lean();
+      expect(stored!.bookings).toEqual([]);
+      expect(stored!.seats.every((s) => s.bookingId === null)).toBe(true);
+    });
+
+    it('treats hall names as unique regardless of case', async () => {
+      await createHall('Зал 1');
+      await http
+        .post('/halls')
+        .send({ name: 'зал 1', rows: 1, seatsPerRow: 1 })
+        .expect(409);
+    });
+
+    it('keeps names unique regardless of case under concurrent requests', async () => {
+      const statuses = (
+        await Promise.all(
+          ['Зал Х', 'зал х', 'ЗАЛ Х'].map((name) =>
+            http.post('/halls').send({ name, rows: 1, seatsPerRow: 1 }),
+          ),
+        )
+      )
+        .map((res) => res.status)
+        .sort((a, b) => a - b);
+      expect(statuses).toEqual([201, 409, 409]);
     });
   });
 });
