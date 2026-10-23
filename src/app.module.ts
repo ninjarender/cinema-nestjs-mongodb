@@ -1,7 +1,7 @@
 import { Module, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_PIPE } from '@nestjs/core';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { MongooseModule } from '@nestjs/mongoose';
 import { BookingsModule } from './bookings/bookings.module.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
 import {
@@ -15,18 +15,10 @@ import { ShowingsModule } from './showings/showings.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate }),
-    TypeOrmModule.forRootAsync({
+    MongooseModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<EnvironmentVariables, true>) => ({
-        type: 'postgres',
-        uuidExtension: 'pgcrypto',
-        host: config.get('POSTGRES_HOST', { infer: true }),
-        port: config.get('POSTGRES_PORT', { infer: true }),
-        username: config.get('POSTGRES_USER', { infer: true }),
-        password: config.get('POSTGRES_PASSWORD', { infer: true }),
-        database: config.get('POSTGRES_DB', { infer: true }),
-        autoLoadEntities: true,
-        synchronize: false, // схема — лише міграціями
+        uri: config.getOrThrow('MONGODB_URI', { infer: true }), // немає змінної → старт зупиняється
       }),
     }),
     FilmsModule,

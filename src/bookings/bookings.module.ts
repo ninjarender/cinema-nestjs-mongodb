@@ -1,17 +1,18 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { HallsModule } from '../halls/halls.module.js';
+import { MongooseModule } from '@nestjs/mongoose';
 import { ShowingsCoreModule } from '../showings/core.module.js';
+import { Showing, ShowingSchema } from '../showings/schemas/showing.schema.js';
 import { BookingsController } from './bookings.controller.js';
 import { BookingsService } from './bookings.service.js';
-import { BookingSeat } from './entities/booking-seat.entity.js';
-import { Booking } from './entities/booking.entity.js';
 
+/**
+ * Окремої колекції бронювань немає: вони лежать у документах сеансів,
+ * тому модуль працює з моделлю Showing.
+ */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Booking, BookingSeat]),
+    MongooseModule.forFeature([{ name: Showing.name, schema: ShowingSchema }]),
     ShowingsCoreModule,
-    HallsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

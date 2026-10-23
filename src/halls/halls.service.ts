@@ -4,93 +4,68 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { isUniqueViolation } from '../common/database-errors.js';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { isDuplicateKeyError } from '../common/database-errors.js';
 import { ShowingsCoreService } from '../showings/showings-core.service.js';
 import { CreateHallDto } from './dto/create-hall.dto.js';
-import { HallWithSeats, Seat } from './dto/hall-with-seats.dto.js';
-import { Hall } from './entities/hall.entity.js';
+import { HallWithSeats } from './dto/hall-with-seats.dto.js';
+import { HallDto } from './dto/hall.dto.js';
+import { CASE_INSENSITIVE, Hall, HallDocument } from './schemas/hall.schema.js';
 
 @Injectable()
 export class HallsService {
   private readonly logger = new Logger(HallsService.name);
 
   constructor(
-    @InjectRepository(Hall)
-    private readonly hallsRepository: Repository<Hall>,
+    @InjectModel(Hall.name)
+    private readonly hallModel: Model<Hall>,
     private readonly showingsCore: ShowingsCoreService,
   ) {}
 
-  async create(dto: CreateHallDto): Promise<Hall> {
-    // Унікальний індекс у БД чутливий до регістру, тому "зал 1" і "Зал 1" перевіряємо тут
-    const nameTaken = await this.hallsRepository
-      .createQueryBuilder('hall')
-      .where('LOWER(hall.name) = LOWER(:name)', { name: dto.name })
-      .getExists();
-    if (nameTaken) {
+  async create(dto: CreateHallDto): Promise<HallDto> {
+    // Та сама колація, що в унікальному індексі: зрозуміле 409 без спроби запису
+    const nameTaken = await this.hallModel
+      .exists({ name: dto.name })
+      .collation(CASE_INSENSITIVE);
+    if (nameTaken !== null) {
       throw this.nameConflict(dto.name);
     }
 
     try {
-      return await this.hallsRepository.save(this.hallsRepository.create(dto));
+      return HallDto.fromDocument(await this.hallModel.create(dto));
     } catch (error) {
-      // Два одночасні запити з тією самою назвою: другий відхилить unique-індекс
-      if (isUniqueViolation(error)) {
+      // Два одночасні запити з тією самою назвою (у будь-якому регістрі): другий відхилить unique-індекс
+      if (isDuplicateKeyError(error)) {
         throw this.nameConflict(dto.name);
       }
       throw error;
     }
   }
 
-  async findAll(): Promise<Hall[]> {
-    return this.hallsRepository.find();
+  async findAll(): Promise<HallDto[]> {
+    const halls = await this.hallModel.find().sort({ _id: 1 });
+    return halls.map((hall) => HallDto.fromDocument(hall));
   }
 
-  async findOne(id: string): Promise<Hall> {
-    const hall = await this.findById(id);
-    if (hall === null) {
-      this.logger.warn(`Зал з id ${id} не знайдено`);
-      throw new NotFoundException(`Зал з id ${id} не знайдено`);
-    }
-    return hall;
-  }
-
-  /** Те саме, що findOne, але без винятку — для перевірок в інших модулях. */
-  async findById(id: string): Promise<Hall | null> {
-    return this.hallsRepository.findOneBy({ id });
+  /** Те саме, що findOneWithSeats, але без винятку — для перевірок в інших модулях. */
+  async findById(id: string): Promise<HallDocument | null> {
+    return this.hallModel.findById(id);
   }
 
   async findOneWithSeats(id: string): Promise<HallWithSeats> {
-    const hall = await this.findOne(id);
-    return {
-      id: hall.id,
-      name: hall.name,
-      rows: hall.rows,
-      seatsPerRow: hall.seatsPerRow,
-      seats: this.getSeats(hall),
-    };
-  }
-
-  /** Перелік місць залу: ряди й місця нумеруються з 1. */
-  getSeats(hall: Hall): Seat[] {
-    const seats: Seat[] = [];
-    for (let row = 1; row <= hall.rows; row++) {
-      for (let seat = 1; seat <= hall.seatsPerRow; seat++) {
-        seats.push({ row, seat });
-      }
+    const hall = await this.findById(id);
+    if (hall === null) {
+      throw this.notFound(id);
     }
-    return seats;
-  }
-
-  hasSeat(hall: Hall, { row, seat }: Seat): boolean {
-    return (
-      row >= 1 && row <= hall.rows && seat >= 1 && seat <= hall.seatsPerRow
-    );
+    return HallWithSeats.fromDocument(hall);
   }
 
   async remove(id: string): Promise<void> {
-    const hall = await this.findOne(id);
+    if ((await this.hallModel.exists({ _id: id })) === null) {
+      throw this.notFound(id);
+    }
+    // Зовнішніх ключів у MongoDB немає: залежні сеанси перевіряємо запитом
     if (await this.showingsCore.hasShowingsForHall(id)) {
       this.logger.warn(
         `Відмова видалити зал ${id}: на нього посилаються сеанси`,
@@ -99,7 +74,12 @@ export class HallsService {
         'Зал не можна видалити: на нього посилається хоча б один сеанс',
       );
     }
-    await this.hallsRepository.remove(hall);
+    await this.hallModel.deleteOne({ _id: id });
+  }
+
+  private notFound(id: string): NotFoundException {
+    this.logger.warn(`Зал з id ${id} не знайдено`);
+    return new NotFoundException(`Зал з id ${id} не знайдено`);
   }
 
   private nameConflict(name: string): ConflictException {

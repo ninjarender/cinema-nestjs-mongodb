@@ -1,7 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Hall } from '../entities/hall.entity.js';
+import { listHallSeats } from '../hall-seats.js';
+import type { HallDocument } from '../schemas/hall.schema.js';
+import { HallDto } from './hall.dto.js';
 
-export class Seat {
+export class SeatPosition {
   @ApiProperty({ example: 1 })
   row: number;
 
@@ -10,10 +12,16 @@ export class Seat {
 }
 
 /** Перелік місць не зберігається в БД — обчислюється з rows × seatsPerRow. */
-export class HallWithSeats extends Hall {
+export class HallWithSeats extends HallDto {
   @ApiProperty({
-    type: [Seat],
+    type: [SeatPosition],
     description: 'Усі місця залу, rows × seatsPerRow',
   })
-  seats: Seat[];
+  seats: SeatPosition[];
+
+  static fromDocument(hall: HallDocument): HallWithSeats {
+    const dto = Object.assign(new HallWithSeats(), HallDto.fromDocument(hall));
+    dto.seats = listHallSeats(hall);
+    return dto;
+  }
 }

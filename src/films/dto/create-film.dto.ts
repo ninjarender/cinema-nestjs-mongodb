@@ -17,7 +17,7 @@ export class CreateFilmDto {
   )
   @IsString()
   @IsNotEmpty()
-  @MaxLength(255) // дублює length колонки → 400, а не помилка PG
+  @MaxLength(255) // дублює maxlength схеми → 400, а не ValidationError Mongoose
   title: string;
 
   @ApiProperty({

@@ -3,99 +3,77 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
+import { getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
-import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
-import { QueryFailedError } from 'typeorm';
-import { Hall } from '../halls/entities/hall.entity.js';
-import { HallsService } from '../halls/halls.service.js';
-import { Showing } from '../showings/entities/showing.entity.js';
+import { Types } from 'mongoose';
+import { Showing } from '../showings/schemas/showing.schema.js';
 import { ShowingsCoreService } from '../showings/showings-core.service.js';
 import { BookingsService } from './bookings.service.js';
-import { BookingSeat } from './entities/booking-seat.entity.js';
-import { Booking } from './entities/booking.entity.js';
 
-const hall: Hall = { id: 'hall-1', name: 'Зал 1', rows: 3, seatsPerRow: 5 };
-const showing: Showing = {
-  id: 'showing-1',
-  filmId: 'film-1',
-  hallId: hall.id,
-  startsAt: new Date('2099-01-01T18:00:00.000Z'),
-  price: 12500,
-  hall,
-};
-
-const uniqueViolation = () =>
-  new QueryFailedError('INSERT', [], {
-    code: '23505',
-    detail: 'Key (showing_id, "row", seat)=(...) already exists.',
-  } as unknown as Error);
+const showingId = new Types.ObjectId();
+const hall = { name: 'Зал 1', rows: 3, seatsPerRow: 5 };
+const showing = { _id: showingId, price: 12500, hall };
 
 describe('BookingsService', () => {
   let service: BookingsService;
 
   // Замінники залежностей: модульний тест перевіряє лише BookingsService
   const showingsCore = { findOne: vi.fn() };
-  const hallsService = {
-    hasSeat: vi.fn(
-      (h: Hall, s: { row: number; seat: number }) =>
-        s.row <= h.rows && s.seat <= h.seatsPerRow,
-    ),
-    getSeats: vi.fn(),
-  };
-  const bookingsRepository = { find: vi.fn(), delete: vi.fn() };
-  const bookingSeatsRepository = { find: vi.fn() };
-  // manager транзакції: create повертає дані як є, save «генерує» id
-  const manager = {
-    create: vi.fn((_entity: unknown, data: object) => ({ ...data })),
-    save: vi.fn(),
-  };
-  const dataSource = {
-    transaction: vi.fn((cb: (m: typeof manager) => unknown) => cb(manager)),
-  };
+  const showingModel = { updateOne: vi.fn(), findById: vi.fn() };
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    showingsCore.findOne.mockResolvedValue(showing);
-    bookingSeatsRepository.find.mockResolvedValue([]);
-    manager.save.mockImplementation(async (value: object) =>
-      Array.isArray(value) ? value : Object.assign(value, { id: 'booking-1' }),
-    );
+    showingsCore.findOne.mockResolvedValue({
+      populate: vi.fn().mockResolvedValue(showing),
+    });
+    showingModel.updateOne.mockResolvedValue({
+      matchedCount: 1,
+      modifiedCount: 1,
+    });
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         BookingsService,
-        { provide: getRepositoryToken(Booking), useValue: bookingsRepository },
-        {
-          provide: getRepositoryToken(BookingSeat),
-          useValue: bookingSeatsRepository,
-        },
-        { provide: getDataSourceToken(), useValue: dataSource },
+        { provide: getModelToken(Showing.name), useValue: showingModel },
         { provide: ShowingsCoreService, useValue: showingsCore },
-        { provide: HallsService, useValue: hallsService },
       ],
     }).compile();
 
     service = moduleRef.get(BookingsService);
   });
 
-  it('пише бронювання й місця в одній транзакції, ціна = ціна сеансу × місця', async () => {
-    const booking = await service.create(showing.id, {
-      seats: [
-        { row: 1, seat: 2 },
-        { row: 1, seat: 1 },
+  it('бронює одним updateOne: $elemMatch на кожне місце, arrayFilters + $push', async () => {
+    const seats = [
+      { row: 1, seat: 2 },
+      { row: 1, seat: 1 },
+    ];
+    const booking = await service.create(showingId.toString(), { seats });
+
+    expect(showingModel.updateOne).toHaveBeenCalledTimes(1);
+    const [filter, update, options] = showingModel.updateOne.mock.calls[0];
+    const bookingId = update.$push.bookings._id as Types.ObjectId;
+
+    expect(filter).toEqual({
+      _id: showingId,
+      $and: seats.map(({ row, seat }) => ({
+        seats: { $elemMatch: { row, seat, bookingId: null } },
+      })),
+    });
+    expect(update.$set).toEqual({ 'seats.$[target].bookingId': bookingId });
+    expect(update.$push.bookings).toMatchObject({ seats, totalPrice: 25000 });
+    expect(options).toEqual({
+      arrayFilters: [
+        {
+          $or: seats.map(({ row, seat }) => ({
+            'target.row': row,
+            'target.seat': seat,
+          })),
+        },
       ],
     });
-
-    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-    expect(manager.create).toHaveBeenCalledWith(BookingSeat, {
-      bookingId: 'booking-1',
-      showingId: showing.id,
-      row: 1,
-      seat: 1,
-    });
     expect(booking).toMatchObject({
-      id: 'booking-1',
-      showingId: showing.id,
+      id: bookingId.toString(),
+      showingId: showingId.toString(),
       totalPrice: 25000,
       seats: [
         { row: 1, seat: 1 },
@@ -104,15 +82,20 @@ describe('BookingsService', () => {
     });
   });
 
-  it('перетворює порушення унікального індексу на 409 без тексту помилки БД', async () => {
-    manager.save.mockImplementation(async (value: object) => {
-      if (Array.isArray(value)) throw uniqueViolation();
-      return Object.assign(value, { id: 'booking-1' });
+  it('matchedCount === 0 → 409 з переліком зайнятих місць', async () => {
+    showingModel.updateOne.mockResolvedValue({
+      matchedCount: 0,
+      modifiedCount: 0,
     });
-    bookingSeatsRepository.find.mockResolvedValue([{ row: 1, seat: 5 }]);
+    showingModel.findById.mockResolvedValue({
+      seats: [
+        { row: 1, seat: 5, bookingId: new Types.ObjectId() },
+        { row: 2, seat: 1, bookingId: null },
+      ],
+    });
 
     const error = await service
-      .create(showing.id, {
+      .create(showingId.toString(), {
         seats: [
           { row: 2, seat: 1 },
           { row: 1, seat: 5 },
@@ -124,39 +107,58 @@ describe('BookingsService', () => {
     expect((error as ConflictException).message).toBe(
       'Місця вже заброньовані на цьому сеансі: ряд 1 місце 5',
     );
-    expect((error as ConflictException).message).not.toContain('Key');
   });
 
-  it('інші помилки БД не маскує під 409', async () => {
-    const fkError = new QueryFailedError('INSERT', [], {
-      code: '23503',
-    } as unknown as Error);
-    manager.save.mockRejectedValue(fkError);
+  it('конфлікт визначає matchedCount, а не modifiedCount', async () => {
+    showingModel.updateOne.mockResolvedValue({
+      matchedCount: 1,
+      modifiedCount: 0,
+    });
 
     await expect(
-      service.create(showing.id, { seats: [{ row: 1, seat: 1 }] }),
-    ).rejects.toBe(fkError);
+      service.create(showingId.toString(), { seats: [{ row: 1, seat: 1 }] }),
+    ).resolves.toMatchObject({ totalPrice: 12500 });
   });
 
-  it('відхиляє місце поза межами залу без транзакції', async () => {
+  it('відхиляє місце поза межами залу ДО оновлення', async () => {
     await expect(
-      service.create(showing.id, { seats: [{ row: 4, seat: 1 }] }),
+      service.create(showingId.toString(), { seats: [{ row: 4, seat: 1 }] }),
     ).rejects.toThrow(BadRequestException);
-    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(showingModel.updateOne).not.toHaveBeenCalled();
   });
 
   it('передає далі 404, якщо сеансу немає', async () => {
     showingsCore.findOne.mockRejectedValue(new NotFoundException());
 
     await expect(
-      service.create('missing', { seats: [{ row: 1, seat: 1 }] }),
+      service.create(showingId.toString(), { seats: [{ row: 1, seat: 1 }] }),
     ).rejects.toThrow(NotFoundException);
-    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(showingModel.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('скасовує одним оновленням: $set звільняє місця, $pull прибирає запис', async () => {
+    const bookingId = new Types.ObjectId();
+
+    await service.remove(bookingId.toString());
+
+    expect(showingModel.updateOne).toHaveBeenCalledWith(
+      { 'bookings._id': bookingId },
+      {
+        $set: { 'seats.$[target].bookingId': null },
+        $pull: { bookings: { _id: bookingId } },
+      },
+      { arrayFilters: [{ 'target.bookingId': bookingId }] },
+    );
   });
 
   it('повертає 404 на скасування неіснуючого бронювання', async () => {
-    bookingsRepository.delete.mockResolvedValue({ affected: 0, raw: [] });
+    showingModel.updateOne.mockResolvedValue({
+      matchedCount: 0,
+      modifiedCount: 0,
+    });
 
-    await expect(service.remove('missing')).rejects.toThrow(NotFoundException);
+    await expect(
+      service.remove(new Types.ObjectId().toString()),
+    ).rejects.toThrow(NotFoundException);
   });
 });

@@ -4,6 +4,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   Max,
   Min,
   validateSync,
@@ -16,27 +17,13 @@ export class EnvironmentVariables {
   @Max(65535)
   PORT: number = 3000;
 
-  // Параметри підключення до PostgreSQL: без них застосунок не стартує
+  // Рядок підключення до MongoDB: без нього застосунок не стартує
   @IsString()
   @IsNotEmpty()
-  POSTGRES_HOST: string;
-
-  @IsInt()
-  @Min(1)
-  @Max(65535)
-  POSTGRES_PORT: number;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_USER: string;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_PASSWORD: string;
-
-  @IsString()
-  @IsNotEmpty()
-  POSTGRES_DB: string;
+  @Matches(/^mongodb(\+srv)?:\/\//, {
+    message: 'MONGODB_URI must start with mongodb:// or mongodb+srv://',
+  })
+  MONGODB_URI: string;
 }
 
 export function validate(

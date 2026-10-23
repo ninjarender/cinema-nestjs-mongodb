@@ -3,7 +3,8 @@
 ### Ідентифікатори підставляються з відповідей попередніх запитів через змінні.
 
 @baseUrl = http://localhost:3000
-@missingId = 00000000-0000-4000-8000-000000000000
+@missingId = 000000000000000000000000
+@badId = abc
 
 @filmId = {{createFilm.response.body.$.id}}
 @otherFilmId = {{createOtherFilm.response.body.$.id}}
@@ -66,6 +67,9 @@ GET {{baseUrl}}/films/{{filmId}}
 ### Помилка: фільму немає → 404
 GET {{baseUrl}}/films/{{missingId}}
 
+### Помилка: id не є ObjectId → 400 (перевірка до звернення до бази)
+GET {{baseUrl}}/films/{{badId}}
+
 ### Оновити фільм (часткове оновлення) → 200
 PATCH {{baseUrl}}/films/{{filmId}}
 Content-Type: application/json
@@ -80,6 +84,14 @@ Content-Type: application/json
 
 {
   "releaseYear": "minulyi"
+}
+
+### Помилка: оновлення з id не ObjectId → 400
+PATCH {{baseUrl}}/films/{{badId}}
+Content-Type: application/json
+
+{
+  "title": "Нема такого"
 }
 
 ### Помилка: оновлення неіснуючого фільму → 404
@@ -153,6 +165,9 @@ GET {{baseUrl}}/halls/{{hallId}}
 ### Помилка: залу немає → 404
 GET {{baseUrl}}/halls/{{missingId}}
 
+### Помилка: id не є ObjectId → 400
+GET {{baseUrl}}/halls/{{badId}}
+
 
 ######################## СЕАНСИ ########################
 
@@ -197,6 +212,17 @@ Content-Type: application/json
 {
   "filmId": "{{filmId}}",
   "hallId": "{{missingId}}",
+  "startsAt": "{{$datetime iso8601 1 d}}",
+  "price": 12500
+}
+
+### Помилка: filmId не є ObjectId → 400
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{badId}}",
+  "hallId": "{{hallId}}",
   "startsAt": "{{$datetime iso8601 1 d}}",
   "price": 12500
 }
@@ -252,8 +278,8 @@ GET {{baseUrl}}/showings?filmId={{filmId}}&date={{$datetime 'YYYY-MM-DD' 1 d}}
 ### Помилка: date не відповідає формату YYYY-MM-DD → 400
 GET {{baseUrl}}/showings?date=01.12.2030
 
-### Помилка: filmId не є UUID → 400
-GET {{baseUrl}}/showings?filmId=abc
+### Помилка: filmId не є ObjectId → 400
+GET {{baseUrl}}/showings?filmId={{badId}}
 
 ### Помилка: page менше 1 → 400
 GET {{baseUrl}}/showings?page=0
@@ -276,11 +302,17 @@ GET {{baseUrl}}/showings/{{showingId}}
 ### Помилка: сеансу немає → 404
 GET {{baseUrl}}/showings/{{missingId}}
 
+### Помилка: id не є ObjectId → 400
+GET {{baseUrl}}/showings/{{badId}}
+
 ### Місця сеансу з ознакою зайнятості (усі вільні) → 200
 GET {{baseUrl}}/showings/{{showingId}}/seats
 
 ### Помилка: місця неіснуючого сеансу → 404
 GET {{baseUrl}}/showings/{{missingId}}/seats
+
+### Помилка: місця сеансу з id не ObjectId → 400
+GET {{baseUrl}}/showings/{{badId}}/seats
 
 
 ######################## БРОНЮВАННЯ ########################
@@ -298,7 +330,7 @@ Content-Type: application/json
 }
 
 ### Помилка: одне з місць уже заброньоване → 409
-### Транзакція відкочується: ряд 2 місце 1 НЕ бронюється, нового бронювання в БД немає
+### Умова оновлення не виконалась — документ сеансу не змінився: ряд 2 місце 1 НЕ бронюється
 POST {{baseUrl}}/showings/{{showingId}}/bookings
 Content-Type: application/json
 
@@ -368,6 +400,16 @@ Content-Type: application/json
   ]
 }
 
+### Помилка: бронювання на сеанс з id не ObjectId → 400
+POST {{baseUrl}}/showings/{{badId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 1 }
+  ]
+}
+
 ### Помилка: бронювання на неіснуючий сеанс → 404
 POST {{baseUrl}}/showings/{{missingId}}/bookings
 Content-Type: application/json
@@ -387,7 +429,10 @@ GET {{baseUrl}}/showings/{{showingId}}/bookings
 ### Помилка: бронювання неіснуючого сеансу → 404
 GET {{baseUrl}}/showings/{{missingId}}/bookings
 
-### Усі бронювання → 200
+### Помилка: бронювання сеансу з id не ObjectId → 400
+GET {{baseUrl}}/showings/{{badId}}/bookings
+
+### Усі бронювання, зібрані з усіх сеансів → 200
 GET {{baseUrl}}/bookings
 
 
@@ -399,17 +444,26 @@ DELETE {{baseUrl}}/films/{{filmId}}
 ### Помилка: на зал посилається сеанс → 409
 DELETE {{baseUrl}}/halls/{{hallId}}
 
+### Помилка: видалення фільму з id не ObjectId → 400
+DELETE {{baseUrl}}/films/{{badId}}
+
 ### Видалити фільм без сеансів → 204
 DELETE {{baseUrl}}/films/{{otherFilmId}}
 
 ### Помилка: фільм уже видалено → 404
 DELETE {{baseUrl}}/films/{{otherFilmId}}
 
+### Помилка: видалення залу з id не ObjectId → 400
+DELETE {{baseUrl}}/halls/{{badId}}
+
 ### Видалити зал без сеансів → 204
 DELETE {{baseUrl}}/halls/{{otherHallId}}
 
 ### Помилка: зал уже видалено → 404
 DELETE {{baseUrl}}/halls/{{otherHallId}}
+
+### Помилка: скасування з id не ObjectId → 400
+DELETE {{baseUrl}}/bookings/{{badId}}
 
 ### Скасувати бронювання → 204
 DELETE {{baseUrl}}/bookings/{{bookingId}}
